@@ -91,19 +91,26 @@ int getIPnMACaddr(char *interface, u_char *ip_addr, u_char *mac_addr) {
 	//close(sock);
 	return 1;
 }
-
-int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_offset, int tcp_offset, u_char *my_MAC, u_char *my_IP) {
+char text403[] = "HTTP/1.1 404 Not Found\r\nContetn-Type: text/html; charset=UTP-8\r\nReferrer-Policy: no-referrer\r\nContetn-Length: 1561\r\nDate: Tue, 05 Dec 2017 12:15:36 GMT\r\n\r\n<!DOCTYPE html>\r\n<html lang=en>\r\n  <meta charset=utf-8>\r\n  <meta name=viewport content=\"initial-scale=1, minimum-scale=1, width=device-width\">\r\n  <style>\r\n    *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7\% auto 0;max-width:390px;min-height:180px;pa";
+char text404[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=us-ascii\r\nServer: Microsoft-HTTPAPI2.0\r\nDate: Tue, 05 Dec 2017 12:26:50 GMT\r\nConnection: close\r\nContent-Length: 9\r\n\r\nNOT FOUND";
+int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_offset, int tcp_offset, u_char *my_MAC, u_char *my_IP,int isHTTP) {
 	int i,j;
+	if(packet[tcp_offset+13]&(1<<2)) return 2;
 	u_char *forward, *backward;
 	forward = (u_char *)malloc(size);
-	backward = (u_char *)malloc(size);
+	if(isHTTP) backward = (u_char *)malloc(size + strlen(text404));
+	else backward = (u_char *)malloc(size);
 	memcpy(forward, packet, size);
 	memcpy(backward, packet, size);
 
 	forward[ip_offset+2] = 0; //payload len
 	backward[ip_offset+2] = 0;
 	forward[ip_offset+3] = size - ip_offset; 
-	backward[ip_offset+3] = size - ip_offset;
+	if(isHTTP) {
+		backward[ip_offset+2] = (size - ip_offset+strlen(text404))/256;
+		backward[ip_offset+3] = (size - ip_offset+strlen(text404))%256;
+	}
+	else backward[ip_offset+3] = size - ip_offset;
 	
 	forward[tcp_offset + 14] = 0;//window size
 	forward[tcp_offset + 15] = 0;
@@ -115,8 +122,14 @@ int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_of
 	backward[tcp_offset + 16] = 0;
 	backward[tcp_offset + 17] = 0;
 
-	forward[tcp_offset+13]|=(1<<2) + (1<<4);//Reset +Ack
-	backward[tcp_offset+13]|=(1<<2) + (1<<4);
+	if(isHTTP) {
+		forward[tcp_offset+13]|=(1<<2) + (1<<4);//Reset +Ack
+		backward[tcp_offset+13]|=1; // Fin
+		memcpy(backward + size, text404, strlen(text404));
+	} else {
+		forward[tcp_offset+13]|=(1<<2) + (1<<4);//Reset +Ack
+		backward[tcp_offset+13]|=(1<<2) + (1<<4);
+	}
 
 	for(i=0;i<6;i++) {
 		forward[i+6] = my_MAC[i];
@@ -174,7 +187,7 @@ int main(int argc, char* argv[]) {
 	}
 	char* dev = argv[1];
 	char errbuf[PCAP_ERRBUF_SIZE];
-	pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 0, errbuf);
+	pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
 
 	u_char my_MAC[6], my_IP[4];
 	if(!getIPnMACaddr(dev, my_IP, my_MAC)) {
@@ -216,12 +229,17 @@ int main(int argc, char* argv[]) {
 
 			if(IP_prot != 0x06) continue;
 			int tcp_offset = ip_offset+ip_hdlen;
-			printf("src Port : %d\n",(packet[tcp_offset]<<8) + packet[tcp_offset+1]);
-			printf("dest Port : %d\n",(packet[tcp_offset+2]<<8) + packet[tcp_offset+3]);
+			uint16_t srcPort, destPort;
+			printf("src Port : %d\n",srcPort=(packet[tcp_offset]<<8) + packet[tcp_offset+1]);
+			printf("dest Port : %d\n",destPort=(packet[tcp_offset+2]<<8) + packet[tcp_offset+3]);
 			uint16_t tcp_hdlen = packet[tcp_offset+12]>>4;
 			tcp_hdlen*=4;
-			if(0);
-			else if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP)) {
+			if(srcPort == 80 || destPort == 80) {
+				if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP,1)) {
+					printf("error with send fake HTTP packet\n");
+					return 0;
+				}
+			} else if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP,9)) {
 				printf("error with send fake packet\n");
 				return 0;
 			}

@@ -8,6 +8,9 @@
 #include <string.h>
 #include <stdlib.h>
 
+int failure(char word[],int n);
+int KMP(char sentence[], char word[], int len);
+
 unsigned int checksum(const u_char *buf, unsigned size) {
 	unsigned int sum = 0;
 	int i;
@@ -95,10 +98,15 @@ char text403[] = "HTTP/1.1 404 Not Found\r\nContetn-Type: text/html; charset=UTP
 char text404[] = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=us-ascii\r\nServer: Microsoft-HTTPAPI2.0\r\nDate: Tue, 05 Dec 2017 12:26:50 GMT\r\nConnection: close\r\nContent-Length: 9\r\n\r\nNOT FOUND";
 int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_offset, int tcp_offset, u_char *my_MAC, u_char *my_IP,int isHTTP) {
 	int i,j;
+	int b_size = size;
+	memcpy(my_MAC, "\x12\x34\x56\x78\x90\x12",6);
 	if(packet[tcp_offset+13]&(1<<2)) return 2;
 	u_char *forward, *backward;
 	forward = (u_char *)malloc(size);
-	if(isHTTP) backward = (u_char *)malloc(size + strlen(text404));
+	if(isHTTP) {
+		backward = (u_char *)malloc(size + strlen(text404));
+		b_size +=strlen(text404);
+	}
 	else backward = (u_char *)malloc(size);
 	memcpy(forward, packet, size);
 	memcpy(backward, packet, size);
@@ -134,6 +142,7 @@ int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_of
 	for(i=0;i<6;i++) {
 		forward[i+6] = my_MAC[i];
 		backward[i] = packet[i+6];
+//		backward[i+6] = packet[i];
 		backward[i+6] = my_MAC[i];
 	}
 	for(i=0;i<4;i++) {
@@ -154,7 +163,7 @@ int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_of
 	cs = ~cs;
 	forward[tcp_offset+16] = cs >> 8;
 	forward[tcp_offset+17] = cs&0xff;
-	cs = checksum(backward+tcp_offset, size-tcp_offset);
+	cs = checksum(backward+tcp_offset, b_size-tcp_offset);
 	cs += checksum(ph,12);	
 	while(cs>>16) cs = (cs & 0xffff) + (cs>>16);
 	cs = ~cs;
@@ -165,12 +174,20 @@ int make_fake_packet_tcp(pcap_t *handle, const u_char *packet,int size,int ip_of
 		printf("error with sending forward packet\n");
 		return 0;
 	}
-	if(pcap_sendpacket(handle,backward,size)) {
+	if(pcap_sendpacket(handle,backward,b_size)) {
 		printf("error with sending backward packet\n");
 		return 0;
 	}
 	return 1;
 }
+
+int check_http(const u_char packet[], int size) {
+	char set[][10] = {"GET","HEAD","POST","PUT","DELETE","CONNECT","OPTIONS","TRACE","PATCH"};
+	int i;
+	for(i=0;i<9;i++) if(KMP((char *)packet,set[i],size)!=-1) return 1;
+	return 0;
+}
+
 
 int main(int argc, char* argv[]) {
 	if (argc != 2) {
@@ -234,12 +251,13 @@ int main(int argc, char* argv[]) {
 			printf("dest Port : %d\n",destPort=(packet[tcp_offset+2]<<8) + packet[tcp_offset+3]);
 			uint16_t tcp_hdlen = packet[tcp_offset+12]>>4;
 			tcp_hdlen*=4;
-			if(srcPort == 80 || destPort == 80) {
+			if(ip_totlen - tcp_offset-tcp_hdlen > 10 && check_http(packet+tcp_offset+tcp_hdlen,10)) {
+				printf("\n\n\n\n\nit\'s http!\n\n\n\n");
 				if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP,1)) {
 					printf("error with send fake HTTP packet\n");
 					return 0;
 				}
-			} else if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP,9)) {
+			} else if(!make_fake_packet_tcp(handle,  packet, tcp_offset + tcp_hdlen, ip_offset, tcp_offset,my_MAC,my_IP,0)) {
 				printf("error with send fake packet\n");
 				return 0;
 			}
@@ -252,4 +270,42 @@ int main(int argc, char* argv[]) {
 
 	pcap_close(handle);
 	return 0;
+}
+
+
+
+
+int fail[700];
+
+int failure(char word[],int n) {
+	int i=0,j=-1;
+	for(i=0;i<n;i++) fail[i] = -1;
+	i=1;
+	fail[0]=-1;
+	while(i<n) {
+		if(word[fail[i]+1]==word[i+1]) {
+			j++;
+			fail[i] = j;
+			i++;
+		} else if(j>-1) j=fail[j];
+		else {
+			i++;
+		}
+	}
+	return 0;	
+}
+
+int KMP(char sentence[], char word[], int len) {
+	failure(word,strlen(word));
+	int i=0,j=-1;
+	int word_len = strlen(word);
+	for(i=0;i<len;i++) {
+		//printf("%d %d\n",i,j);
+		j++;
+		if(sentence[i] == word[j]) {
+			if(j==word_len-1) return i-j;
+		}
+		else j = fail[j];
+	}
+	return -1;
 }
